@@ -2,15 +2,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define CHANNEL 6
-#define CONV_OUTPUT_SIZE 24
-#define FILTER_SIZE 5
-#define INSIZE 28
 #define NUM_CLASSES 10
-#define SS_CHANNELS 1
-#define SS_OUTPUT_SIZE 6
+
+#define INSIZE 28
+#define FILTER_SIZE 5
+#define STRIDE 1
+#define CHANNEL 6
+
+#define CONV_OUTPUT_SIZE ((INSIZE - FILTER_SIZE)/STRIDE + 1) //24
 #define SS_SIZE 4
-#define STRIDE 4
+#define SS_STRIDE 4
+#define SS_CHANNELS 1
+
+#define SS_OUTPUT_SIZE ((CONV_OUTPUT_SIZE - SS_SIZE)/SS_STRIDE + 1) //6
 
 #define N1 CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE
 #define K1 64
@@ -280,7 +284,7 @@ __global__ void kernel_ss1_filter(float input[CHANNEL][CONV_OUTPUT_SIZE][CONV_OU
 
 	for (int i = 0; i < SS_SIZE; i++) {
 		for (int j = 0; j < SS_SIZE; j++) {
-			tempC += weight[0][i][j] * input[channel][i + output_x * STRIDE][j + output_y * STRIDE];
+			tempC += weight[0][i][j] * input[channel][i + output_x * SS_STRIDE][j + output_y * SS_STRIDE];
 		}
 	}
 
@@ -303,12 +307,13 @@ __global__ void kernel_ss1_sigmoid(float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_
 	output[channel][output_x][output_y] = 1 / (1 + exp(-pre_output[channel][output_x][output_y]));
 }
 
-__global__ void kernel_fc1(float input[6][6][6], float pre_output[10], float weight[10][6][6][6]) {
+__global__ void kernel_fc1(float input[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE], float pre_output[NUM_CLASSES], 
+                            float weight[NUM_CLASSES][CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE]) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	int channel = idx % NUM_CLASSES;
 	float tempC = 0.0f;
 
-	for (int i = 0; i < SS_OUTPUT_SIZE; i++) {
+	for (int i = 0; i < CHANNEL; i++) {
 		for (int j = 0; j < SS_OUTPUT_SIZE; j++) {
 			for (int k = 0; k < SS_OUTPUT_SIZE; k++) {
 				tempC += weight[channel][i][j][k] * input[i][j][k];
@@ -319,13 +324,13 @@ __global__ void kernel_fc1(float input[6][6][6], float pre_output[10], float wei
 	pre_output[channel] = tempC;
 }
 
-__global__ void kernel_fc1_bias(float pre_output[10], float bias[10]) {
+__global__ void kernel_fc1_bias(float pre_output[NUM_CLASSES], float bias[NUM_CLASSES]) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	int channel = idx % NUM_CLASSES;
 	pre_output[channel] += bias[channel];
 }
 
-__global__ void kernel_fc1_sigmoid(float pre_output[10], float output[10]) {
+__global__ void kernel_fc1_sigmoid(float pre_output[NUM_CLASSES], float output[NUM_CLASSES]) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	int channel = idx % NUM_CLASSES;
 	output[channel] = 1 / (1 + exp(-pre_output[channel]));
@@ -334,10 +339,13 @@ __global__ void kernel_fc1_sigmoid(float pre_output[10], float output[10]) {
 void verifyConv(float *A, float val) {
 	float maxError = 0.0f;
 
-	for (int i = 0; i < CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE; i++) 
+  int cnt = 0; 
+	for (int i = 0; i < CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE; i++){ 
 		maxError = max(abs(A[i] - val), maxError);
-
-	printf("maxError = %f\n", maxError);
+    if (maxError != 0)
+      cnt++; 
+  }
+	printf("maxError = %f (cnt = %d),%d)\n", maxError, cnt, CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE);
 }
 
 void verifySS(float *A, float val) {
@@ -520,7 +528,7 @@ int main() {
 	}
 
 	// Verifying the image and label data of the specified number of examples
-	printExamples(&test_set, 1);
+	//printExamples(&test_set, 1);
 
 	// Verifying the convolutional layer
 	double data[INSIZE][INSIZE];
@@ -532,7 +540,7 @@ int main() {
 
 	forward_pass(data, true);
 
-	copy_trained_parameters();
+	//copy_trained_parameters();
 
 	// Performing forward pass
 	unsigned int error = 0;
