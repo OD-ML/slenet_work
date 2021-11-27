@@ -4,6 +4,13 @@
 
 #define NUM_CLASSES 10
 
+#define INPUT -1.0f // 1.0f //
+#define WEIGHT -1.0f // 1.0f //
+#define BIAS -1.0f // 1.0f //
+#define CONV_POST_ACT 1.0f //  1.0f //
+#define SS_POST_ACT  0.0f // 1.0f //
+#define FC_POST_ACT  (1/(1+2.71828)) // 1.0f //
+
 #define INSIZE 28
 #define FILTER_SIZE 5
 #define STRIDE 1
@@ -37,6 +44,7 @@ class Layer {
 		int M, N, O;
 		float *pre_output, *output;
 		float *weight, *bias;
+    float *im2col_A; //for im2col
 
 		Layer(int M, int N, int O);
 		~Layer();
@@ -54,16 +62,19 @@ Layer::Layer(int M, int N, int O) {
 	temp_bias = (float*)malloc(sizeof(float) * N);
 
 	for (int i = 0; i < M * N; i++)
-		temp_weight[i] = 1.0f;
+		temp_weight[i] = WEIGHT; //1.0f;
 
 	for (int i = 0; i < N; i++)
-		temp_bias[i] = 1.0f;
+		temp_bias[i] = BIAS; //1.0f;
 
 	// Allocating space for CUDA variables
 	cudaMalloc(&pre_output, sizeof(float) * O);
 	cudaMalloc(&output, sizeof(float) * O);
 	cudaMalloc(&weight, sizeof(float) * M * N);
 	cudaMalloc(&bias, sizeof(float) * N);
+
+  cudaMalloc(&im2col_A, sizeof(float) *M*O/N);
+  
 
 	// Copying weights and biases to CUDA variables
 	cudaMemcpy(weight, temp_weight, sizeof(float) * M * N, cudaMemcpyHostToDevice);
@@ -80,6 +91,7 @@ Layer::~Layer() {
 	cudaFree(output);
 	cudaFree(weight);
 	cudaFree(bias);
+  cudaFree(im2col_A);
 }
 
 // Initializing a convolutional layer
@@ -255,16 +267,18 @@ __global__ void kernel_conv_filter(float input[INSIZE][INSIZE], float pre_output
 			tempC += weight[channel][i][j] * input[i + output_x][j + output_y];
 		}
 	}
-
-	pre_output[channel][output_x][output_y] = tempC;
+  if (idx < CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE)
+	  pre_output[channel][output_x][output_y] = tempC;
 }
+
 
 __global__ void kernel_conv_bias(float pre_output[CHANNEL][CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE], float bias[CHANNEL]) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	int channel = idx % CHANNEL;
 	int output_x = (idx / CHANNEL) % CONV_OUTPUT_SIZE;
 	int output_y = (idx / CHANNEL / CONV_OUTPUT_SIZE) % CONV_OUTPUT_SIZE;
-	pre_output[channel][output_x][output_y] += bias[channel];
+  if (idx < CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE)
+	  pre_output[channel][output_x][output_y] += bias[channel];
 }
 
 __global__ void kernel_conv_sigmoid(float preact[CHANNEL][CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE], float output[CHANNEL][CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE]) {
@@ -272,7 +286,8 @@ __global__ void kernel_conv_sigmoid(float preact[CHANNEL][CONV_OUTPUT_SIZE][CONV
 	int channel = idx % CHANNEL;
 	int output_x = (idx / CHANNEL) % CONV_OUTPUT_SIZE;
 	int output_y = (idx / CHANNEL / CONV_OUTPUT_SIZE) % CONV_OUTPUT_SIZE;
-	output[channel][output_x][output_y] = 1 / (1 + exp(-preact[channel][output_x][output_y]));
+  if (idx < CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE)
+	  output[channel][output_x][output_y] = 1 / (1 + exp(-preact[channel][output_x][output_y]));
 }
 
 __global__ void kernel_ss1_filter(float input[CHANNEL][CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE], float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE], float weight[SS_CHANNELS][SS_SIZE][SS_SIZE]) {
@@ -287,8 +302,8 @@ __global__ void kernel_ss1_filter(float input[CHANNEL][CONV_OUTPUT_SIZE][CONV_OU
 			tempC += weight[0][i][j] * input[channel][i + output_x * SS_STRIDE][j + output_y * SS_STRIDE];
 		}
 	}
-
-	pre_output[channel][output_x][output_y] = tempC;
+  if (idx < CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE)
+	  pre_output[channel][output_x][output_y] = tempC;
 }
 
 __global__ void kernel_ss1_bias(float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE], float bias[SS_CHANNELS]) {
@@ -296,7 +311,8 @@ __global__ void kernel_ss1_bias(float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_OUT
 	int channel = idx % CHANNEL;
 	int output_x = (idx / CHANNEL) % SS_OUTPUT_SIZE;
 	int output_y = (idx / CHANNEL / SS_OUTPUT_SIZE) % SS_OUTPUT_SIZE;
-	pre_output[channel][output_x][output_y] += bias[0];
+  if (idx < CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE)
+	  pre_output[channel][output_x][output_y] += bias[0];
 }
 
 __global__ void kernel_ss1_sigmoid(float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE], float output[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE]) {
@@ -304,7 +320,8 @@ __global__ void kernel_ss1_sigmoid(float pre_output[CHANNEL][SS_OUTPUT_SIZE][SS_
 	int channel = idx % CHANNEL;
 	int output_x = (idx / CHANNEL) % SS_OUTPUT_SIZE;
 	int output_y = (idx / CHANNEL / SS_OUTPUT_SIZE) % SS_OUTPUT_SIZE;
-	output[channel][output_x][output_y] = 1 / (1 + exp(-pre_output[channel][output_x][output_y]));
+  if (idx < CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE)
+	  output[channel][output_x][output_y] = 1 / (1 + exp(-pre_output[channel][output_x][output_y]));
 }
 
 __global__ void kernel_fc1(float input[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE], float pre_output[NUM_CLASSES], 
@@ -351,20 +368,66 @@ void verifyConv(float *A, float val) {
 void verifySS(float *A, float val) {
 	float maxError = 0.0f;
 
-	for (int i = 0; i < CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE; i++)
+  int cnt = 0;
+	for (int i = 0; i < CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE; i++){
 		maxError = max(abs(A[i] - val), maxError);
-
-	printf("maxError = %f\n", maxError);
+    if (maxError > 0.0001f)
+      cnt++; 
+  }
+	printf("maxError = %f (cnt = %d),%d)\n", maxError, cnt, CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE);
 }
 
 void verifyFC(float *A, float val) {
 	float maxError = 0.0f;
 
-	for (int i = 0; i < NUM_CLASSES; i++)
+  int cnt = 0;
+	for (int i = 0; i < NUM_CLASSES; i++){
 		maxError = max(abs(A[i] - val), maxError);
-
-	printf("maxError = %f\n", maxError);
+    if (maxError > 0.0009f)
+      cnt++; 
+  }
+	printf("maxError = %f (cnt = %d),%d)\n", maxError, cnt, NUM_CLASSES);
 }
+
+// CUDA: grid stride looping
+#define CUDA_KERNEL_LOOP(i, n) \
+   for (int i = blockIdx.x * blockDim.x + threadIdx.x; \
+        i < (n); \
+        i += blockDim.x * gridDim.x)
+
+// https://github.com/BVLC/caffe/blob/master/src/caffe/util/im2col.cu
+__global__ void im2col_gpu_kernel_ext(const int n, const float* data_im,
+    const int height, const int width, const int kernel_h, const int kernel_w,
+    const int pad_h, const int pad_w,
+    const int stride_h, const int stride_w,
+    const int dilation_h, const int dilation_w,
+    const int height_col, const int width_col,
+    float* data_col) {
+    CUDA_KERNEL_LOOP(index, n) {
+        const int h_index = index / width_col;
+        const int h_col = h_index % height_col;
+        const int w_col = index % width_col;
+        const int c_im = h_index / height_col;
+        const int c_col = c_im * kernel_h * kernel_w;
+        const int h_offset = h_col * stride_h - pad_h;
+        const int w_offset = w_col * stride_w - pad_w;
+        float* data_col_ptr = data_col;
+        data_col_ptr += (c_col * height_col + h_col) * width_col + w_col;
+        const float* data_im_ptr = data_im;
+        data_im_ptr += (c_im * height + h_offset) * width + w_offset;
+        for (int i = 0; i < kernel_h; ++i) {
+            for (int j = 0; j < kernel_w; ++j) {
+                int h_im = h_offset + i * dilation_h;
+                int w_im = w_offset + j * dilation_w;
+                *data_col_ptr =
+                    (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                    data_im_ptr[i * dilation_h * width + j * dilation_w] : 0;
+                data_col_ptr += height_col * width_col;
+            }
+        }
+    }
+}
+
 
 // Performing a forward pass using a single image
 static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
@@ -374,99 +437,156 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
 
 	for (int i = 0; i < INSIZE; i++) {
 		for (int j = 0; j < INSIZE; j++)
-			input[i][j] = data[i][j];
+      input[i][j] = INPUT; //Simulated data
+			//input[i][j] = data[i][j];  //MNIST data
 	}
 
 	float (*d_input)[INSIZE];
 	cudaMalloc(&d_input, sizeof(float) * INSIZE * INSIZE);
 	cudaMemcpy(d_input, input, sizeof(float) * INSIZE * INSIZE, cudaMemcpyHostToDevice);
 
+  //For im2col workspace 
+  //float* im2col_input;  
+  //cudaMalloc(&im2col_input, sizeof(float) * INSIZE * INSIZE);
+
+  //float* im2col_workspace;  
+  //cudaMalloc(&im2col_workspace, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
+
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 	cudaEventRecord(start, 0);
 
-	// Performing Convolutional filtering
-	kernel_conv_filter<<<N1/K1, K1>>>(d_input, (float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output, (float(*)[FILTER_SIZE][FILTER_SIZE])conv_layer.weight);
 
+  //im2col_gpu_kernel_ext<<<(N1+K1-1)/K1, K1>>>(CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE, d_input, INSIZE, INSIZE, FILTER_SIZE, FILTER_SIZE, 0, 0, STRIDE, STRIDE, 1, 1, CONV_OUTPUT_SIZE, CONV_OUTPUT_SIZE,ic_workspace);
+///*
+  im2col_gpu_kernel_ext<<<(N1+K1-1)/K1, K1>>>(CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE, //num_kernels, = channels * height_col * width_col; 
+                                              (float *)d_input, //data_im, 
+                                              INSIZE, //height, 
+                                              INSIZE, //width, 
+                                              FILTER_SIZE, //kernel_h, 
+                                              FILTER_SIZE, //kernel_w, 
+                                              0, //pad_h,
+                                              0, //pad_w, 
+                                              STRIDE, //stride_h, 
+                                              STRIDE, //stride_w, 
+                                              1, //dilation_h, 
+                                              1, //dilation_w, 
+                                              CONV_OUTPUT_SIZE, //height_col, 
+                                              CONV_OUTPUT_SIZE, //width_col, 
+                                              conv_layer.im2col_A); //data_col);
+                                      
+//*/
+
+	// Verifying im2col operation
+	if (verify) {
+		printf("Verifying im2col: ");
+		verification = (float*)malloc(sizeof(float) * FILTER_SIZE * FILTER_SIZE * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
+		cudaMemcpy(verification, conv_layer.im2col_A, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
+		verifyConv(verification, INPUT); //-1.0f
+		free(verification);
+	}
+
+#if 0
+  int n = CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE; //l.out_w*l.out_h
+  int k = FILTER_SIZE * FILTER_SIZE; // l.size*l.size
+  int m = CHANNEL; // l.n / l.groups
+
+  //For gemm workspace 
+  //float *a = (float*)malloc(sizeof(float) * M * N);
+
+  float *a = (float*)malloc(sizeof(float)*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE*FILTER_SIZE*FILTER_SIZE); 
+                  //l.weights_gpu + j*l.nweights / l.groups;
+  float *b = im2col_workspace; //state.workspace
+  float *c = l.output_gpu + (i*l.groups + j)*n*m;
+
+  gemm_ongpu(0, 1, m, n, k, 1, a, k, b, k, 1, c, n);
+#endif 
+
+
+	// Performing Convolutional filtering
+	kernel_conv_filter<<<(N1+K1-1)/K1, K1>>>(d_input, 
+                                            (float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output,
+                                            (float(*)[FILTER_SIZE][FILTER_SIZE])conv_layer.weight);
+  
 	// Verifying Convolutional filtering operation
 	if (verify) {
-		printf("Verifying Convolutional filtering operation: ");
+		printf("Veri Convolutional filtering");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
 		cudaMemcpy(verification, conv_layer.pre_output, sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifyConv(verification, 25.0f);
+		verifyConv(verification, INPUT*WEIGHT*FILTER_SIZE*FILTER_SIZE); //25.0f
 		free(verification);
 	}
 
 	// Performing Convolutional bias addition
-	kernel_conv_bias<<<N1/K1, K1>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output, conv_layer.bias);
+	kernel_conv_bias<<<(N1+K1-1)/K1, K1>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output, conv_layer.bias);
 
 	// Verifying Convolutional bias operation
 	if (verify) {
-		printf("Verifying Convolutional bias operation: ");
+		printf("Veri Convolutional bias: ");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
 		cudaMemcpy(verification, conv_layer.pre_output, sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifyConv(verification, 26.0f);
+		verifyConv(verification, INPUT*WEIGHT*FILTER_SIZE*FILTER_SIZE + BIAS); // 26.0f
 		free(verification);
 	}
 
 	// Performing Convolutional sigmoid operation
-	kernel_conv_sigmoid<<<N1/K1, K1>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output, (float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.output);
+	kernel_conv_sigmoid<<<(N1+K1-1)/K1, K1>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.pre_output, (float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.output);
 
 	// Verifying Convolutional sigmoid operation
 	if (verify) {
-		printf("Verifying Convolutional sigmoid operation: ");
+		printf("Veri Convolutional sigmoid: ");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
 		cudaMemcpy(verification, conv_layer.output, sizeof(float) * CHANNEL * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifyConv(verification, 1.0f);
+		verifyConv(verification, CONV_POST_ACT); // 1.0f
 		free(verification);
 	}
 
 	// Performing Subsampling filtering
-	kernel_ss1_filter<<<N2/K2, K2>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.output, (float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, (float(*)[SS_SIZE][SS_SIZE])ss_layer.weight);
+	kernel_ss1_filter<<<(N2+K2-1)/K2, K2>>>((float(*)[CONV_OUTPUT_SIZE][CONV_OUTPUT_SIZE])conv_layer.output, (float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, (float(*)[SS_SIZE][SS_SIZE])ss_layer.weight);
 
 	// Verifying Subsampling filtering operation
 	if (verify) {
-		printf("Verifying Subsampling filtering operation: ");
+		printf("Veri Subsampling filtering: ");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE);
 		cudaMemcpy(verification, ss_layer.pre_output, sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifySS(verification, 16.0f);
+		verifySS(verification, CONV_POST_ACT*WEIGHT*SS_SIZE*SS_SIZE); //16.0f
 		free(verification);
 	}
 
 	// Performing Subsampling bias addition
-	kernel_ss1_bias<<<N2/K2, K2>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, ss_layer.bias);
+	kernel_ss1_bias<<<(N2+K2-1)/K2, K2>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, ss_layer.bias);
 
 	// Verifying Subsampling bias operation
 	if (verify) {
-		printf("Verifying Subsampling bias operation: ");
+		printf("Veri Subsampling bias: ");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE);
 		cudaMemcpy(verification, ss_layer.pre_output, sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifySS(verification, 17.0f);
+		verifySS(verification, CONV_POST_ACT*WEIGHT*SS_SIZE*SS_SIZE + BIAS); // 17.0f
 		free(verification);
 	}
 
 	// // Performing Subsampling sigmoid operation
-	kernel_ss1_sigmoid<<<N2/K2, K2>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, (float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.output);
+	kernel_ss1_sigmoid<<<(N2+K2-1)/K2, K2>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.pre_output, (float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.output);
 
 	// Verifying Subsampling sigmoid operation
 	if (verify) {
-		printf("Verifying Subsampling sigmoid operation: ");
+		printf("Veri Subsampling sigmoid: ");
 		verification = (float*)malloc(sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE);
 		cudaMemcpy(verification, ss_layer.output, sizeof(float) * CHANNEL * SS_OUTPUT_SIZE * SS_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifySS(verification, 1.0f);
+		verifySS(verification, SS_POST_ACT); //1.0f
 		free(verification);
 	}
 
 	// Performing Fully-Connected Computation
-	kernel_fc1<<<N3/K3, K3>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.output, (float(*))fc_layer.pre_output, (float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])fc_layer.weight);
+	kernel_fc1<<<(N3+K3-1)/K3, K3>>>((float(*)[SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])ss_layer.output, (float(*))fc_layer.pre_output, (float(*)[CHANNEL][SS_OUTPUT_SIZE][SS_OUTPUT_SIZE])fc_layer.weight);
 
 	// Verifying Fully-Connected Computation
 	if (verify) {
-		printf("Verifying Fully-Connected Computation: ");
+		printf("Veri Fully-Connected: ");
 		verification = (float*)malloc(sizeof(float) * NUM_CLASSES);
 		cudaMemcpy(verification, fc_layer.pre_output, sizeof(float) * NUM_CLASSES, cudaMemcpyDeviceToHost);
-		verifyFC(verification, 216.0f);
+		verifyFC(verification, SS_POST_ACT*WEIGHT*CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE);//216.0f
 		free(verification);
 	}
 
@@ -475,10 +595,10 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
 
 	// Verifying Fully-Connected bias operation
 	if (verify) {
-		printf("Verifying Fully-Connected bias operation: ");
+		printf("Veri Fully-Connected bias: ");
 		verification = (float*)malloc(sizeof(float) * NUM_CLASSES);
 		cudaMemcpy(verification, fc_layer.pre_output, sizeof(float) * NUM_CLASSES, cudaMemcpyDeviceToHost);
-		verifyFC(verification, 217.0f);
+		verifyFC(verification, SS_POST_ACT*WEIGHT*CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE + BIAS); //217.0f
 		free(verification);
 	}
 
@@ -490,10 +610,10 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
 
 	// Verifying Fully-Connected sigmoid operation
 	if (verify) {
-		printf("Verifying Fully-Connected sigmoid operation: ");
+		printf("Veri Fully-Connected sigmoid: ");
 		verification = (float*)malloc(sizeof(float) * NUM_CLASSES);
 		cudaMemcpy(verification, fc_layer.output, sizeof(float) * NUM_CLASSES, cudaMemcpyDeviceToHost);
-		verifyFC(verification, 1.0f);
+		verifyFC(verification, FC_POST_ACT); // 1.0f
 		free(verification);
 	}
 
@@ -535,7 +655,7 @@ int main() {
 
 	for (i = 0; i < INSIZE; i++) {
 		for (int j = 0; j < INSIZE; j++)
-			data[i][j] = 1.0f;
+			data[i][j] = INPUT; //1.0f;
 	}
 
 	forward_pass(data, true);
