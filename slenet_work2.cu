@@ -13,9 +13,9 @@
 
 #define NUM_CLASSES 10
 
-#define INPUT -1.7f // 1.0f //
-#define WEIGHT -1.3f // 1.0f //
-#define BIAS -1.6f // 1.0f //
+#define INPUT -1.0f // 1.0f //
+#define WEIGHT -1.0f // 1.0f //
+#define BIAS -1.0f // 1.0f //
 #define CONV_POST_ACT 1.0f //  1.0f //
 #define SS_POST_ACT  0.0f // 1.0f //
 #define FC_POST_ACT  (1/(1+2.71828)) // 1.0f //
@@ -34,6 +34,9 @@
 
 #define N1 CHANNEL*CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE
 #define K1 64
+
+#define N11 CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE
+#define K11 64
 
 #define N2 CHANNEL*SS_OUTPUT_SIZE*SS_OUTPUT_SIZE
 #define K2 8
@@ -254,8 +257,11 @@ Layer::Layer(int M, int N, int O) {
 	temp_weight = (float*)malloc(sizeof(float) * M * N);
 	temp_bias = (float*)malloc(sizeof(float) * N);
 
-	for (int i = 0; i < M * N; i++)
-		temp_weight[i] = WEIGHT; //1.0f;
+  temp_weight[0] = 0.0f; 
+	for (int i = 0; i < M * N; i++){
+		//temp_weight[i] = WEIGHT; //1.0f;
+    temp_weight[i+1] = temp_weight[i]+1.0f; 
+  }
 
 	for (int i = 0; i < N; i++)
 		temp_bias[i] = BIAS; //1.0f;
@@ -548,14 +554,14 @@ __global__ void kernel_fc1_sigmoid(float pre_output[NUM_CLASSES], float output[N
 	output[channel] = 1 / (1 + exp(-pre_output[channel]));
 }
 
-__global__ void ker2col_kernel(float weight_col[FILTER_SIZE*FILTER_SIZE][CHANNEL], float weight[CHANNEL][FILTER_SIZE][FILTER_SIZE]) {
+__global__ void ker2col_kernel(float weight_col[CHANNEL][FILTER_SIZE*FILTER_SIZE], float weight[CHANNEL][FILTER_SIZE][FILTER_SIZE]) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x; 
   
   int channel = idx % CHANNEL;
 	int x = (idx / CHANNEL) % FILTER_SIZE;
 	int y = (idx / CHANNEL / FILTER_SIZE) % FILTER_SIZE;
   if (idx < CHANNEL*FILTER_SIZE*FILTER_SIZE)
-	  weight_col[x*FILTER_SIZE + y][channel] = weight[channel][x][y];
+	  weight_col[channel][x*FILTER_SIZE + y] = weight[channel][x][y];
 }
 
 
@@ -624,39 +630,45 @@ void verifyFC(float *A, float val) {
         i += blockDim.x * gridDim.x)
 
 // https://github.com/BVLC/caffe/blob/master/src/caffe/util/im2col.cu
-__global__ void im2col_gpu_kernel_ext(const int n, const float* data_im,
-    const int height, const int width, const int kernel_h, const int kernel_w,
-    const int pad_h, const int pad_w,
-    const int stride_h, const int stride_w,
-    const int dilation_h, const int dilation_w,
-    const int height_col, const int width_col,
-    float* data_col) {
-    CUDA_KERNEL_LOOP(index, n) {
-        const int h_index = index / width_col;
-        const int h_col = h_index % height_col;
-        const int w_col = index % width_col;
-        const int c_im = h_index / height_col;
-        const int c_col = c_im * kernel_h * kernel_w;
-        const int h_offset = h_col * stride_h - pad_h;
-        const int w_offset = w_col * stride_w - pad_w;
+__global__ void im2col_gpu_kernel(const int n, const float* data_im,
+        const int height, const int width, const int ksize,
+        const int pad,
+        const int stride,
+        const int height_col, const int width_col,
+        float *data_col) {
+
+    int index = blockIdx.x*blockDim.x+threadIdx.x;
+
+    for(; index < n; index += blockDim.x*gridDim.x){
+        int w_out = index % width_col;
+        int h_index = index / width_col;
+        int h_out = h_index % height_col;
+        int channel_in = h_index / height_col;
+        int channel_out = channel_in * ksize * ksize;
+        int h_in = h_out * stride - pad;
+        int w_in = w_out * stride - pad;
         float* data_col_ptr = data_col;
-        data_col_ptr += (c_col * height_col + h_col) * width_col + w_col;
+        data_col_ptr += (channel_out * height_col + h_out) * width_col + w_out;
         const float* data_im_ptr = data_im;
-        data_im_ptr += (c_im * height + h_offset) * width + w_offset;
-        for (int i = 0; i < kernel_h; ++i) {
-            for (int j = 0; j < kernel_w; ++j) {
-                int h_im = h_offset + i * dilation_h;
-                int w_im = w_offset + j * dilation_w;
-                *data_col_ptr =
-                    (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
-                    data_im_ptr[i * dilation_h * width + j * dilation_w] : 0;
+        data_im_ptr += (channel_in * height + h_in) * width + w_in;
+        for (int i = 0; i < ksize; ++i) {
+            for (int j = 0; j < ksize; ++j) {
+                int h = h_in + i;
+                int w = w_in + j;
+
+                *data_col_ptr = (h >= 0 && w >= 0 && h < height && w < width) ?
+                    data_im_ptr[i * width + j] : 0;
+
+                //data_im[(channel_in * height + h_in) * width + w_in + i * width + j];
+                //(*data_col_ptr) = data_im_ptr[ii * width + jj];
+
                 data_col_ptr += height_col * width_col;
             }
         }
     }
 }
 
-
+///*
 void gemm_ongpu(int TA, int TB, int M, int N, int K, float ALPHA,
         float *A_gpu, int lda,
         float *B_gpu, int ldb,
@@ -672,6 +684,10 @@ void gemm_ongpu(int TA, int TB, int M, int N, int K, float ALPHA,
     cudaError_t status = (cudaError_t)cublasSgemm(handle, (TB ? CUBLAS_OP_T : CUBLAS_OP_N),
             (TA ? CUBLAS_OP_T : CUBLAS_OP_N), N, M, K, &ALPHA, B_gpu, ldb, A_gpu, lda, &BETA, C_gpu, ldc);
 }
+//*/
+
+
+
 
 
 // Performing a forward pass using a single image
@@ -679,11 +695,15 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
 	// Copying a double data to a float data
 	float input[INSIZE][INSIZE];
 	float *verification;
-
+  
+  input[0][0] = 0.0f; 
 	for (int i = 0; i < INSIZE; i++) {
-		for (int j = 0; j < INSIZE; j++)
+		for (int j = 0; j < INSIZE; j++){
       //input[i][j] = INPUT; //Simulated data
 			input[i][j] = data[i][j];  //MNIST data
+      //printf("%f ",input[i][j]);
+    }
+    //printf("\n");
 	}
 
 	float (*d_input)[INSIZE];
@@ -705,46 +725,100 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
 #if 1 // gemm or direct setting 
   //im2col_gpu_kernel_ext<<<(N1+K1-1)/K1, K1>>>(CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE, d_input, INSIZE, INSIZE, FILTER_SIZE, FILTER_SIZE, 0, 0, STRIDE, STRIDE, 1, 1, CONV_OUTPUT_SIZE, CONV_OUTPUT_SIZE,ic_workspace);
 ///*
-  im2col_gpu_kernel_ext<<<(N1+K1-1)/K1, K1>>>(CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE, //num_kernels, = channels * height_col * width_col; 
+  im2col_gpu_kernel<<<(N11+K11-1)/K11, K11>>>(CONV_OUTPUT_SIZE*CONV_OUTPUT_SIZE, //num_kernels, = channels * height_col * width_col; 
                                               (float *)d_input, //data_im, 
                                               INSIZE, //height, 
                                               INSIZE, //width, 
-                                              FILTER_SIZE, //kernel_h, 
-                                              FILTER_SIZE, //kernel_w, 
-                                              0, //pad_h,
-                                              0, //pad_w, 
-                                              STRIDE, //stride_h, 
-                                              STRIDE, //stride_w, 
-                                              1, //dilation_h, 
-                                              1, //dilation_w, 
+                                              FILTER_SIZE, //ksize, 
+                                              0, //pad,
+                                              STRIDE, //stride, 
                                               CONV_OUTPUT_SIZE, //height_col, 
                                               CONV_OUTPUT_SIZE, //width_col, 
-                                              conv_layer.im2col_A); //data_col);
+                                              (float *)conv_layer.im2col_A); //data_col);
                                       
 //*/
 
 	// Verifying im2col operation
-	if (verify) {
+	if (verify) { //verify
 		printf("Verifying im2col: ");
+
+		verification = (float*)malloc(sizeof(float) * INSIZE * INSIZE );
+		cudaMemcpy(verification, d_input, sizeof(float) * INSIZE *INSIZE, cudaMemcpyDeviceToHost);
+		//verifyConv(verification, INPUT); //-1.0f 
+
+    #if 0
+    for(int i=0; i<INSIZE*INSIZE; i++){ 
+      
+      if (i%(INSIZE) == 0){
+           printf("\n");
+      }
+      printf("%3.0f ", verification[i]);
+    }
+    printf("\n");
+    #endif 
+    free(verification);
+
 		verification = (float*)malloc(sizeof(float) * FILTER_SIZE * FILTER_SIZE * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE);
 		cudaMemcpy(verification, conv_layer.im2col_A, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE, cudaMemcpyDeviceToHost);
-		verifyConv(verification, INPUT); //-1.0f
+		verifyConv(verification, INPUT); //-1.0f 
+
+///*
+  #if 0
+      for(int i=0; i<FILTER_SIZE * FILTER_SIZE*CONV_OUTPUT_SIZE; i++){ 
+      
+      //FILTER_SIZE * FILTER_SIZE
+      if (i%(CONV_OUTPUT_SIZE) == 0){
+           printf("\n");
+      }
+      printf("%3.0f ", verification[i]);
+    }
+    printf("\n");
+  #endif 
+//*/
 		free(verification);
 	}
 
   //ker2col operation 
-  ker2col_kernel<<<6, 5*5>>>((float(*)[CHANNEL])conv_layer.gemm_B , (float(*)[FILTER_SIZE][FILTER_SIZE])conv_layer.weight); 
+  ker2col_kernel<<<6, 5*5>>>((float(*)[FILTER_SIZE*FILTER_SIZE])conv_layer.gemm_B , (float(*)[FILTER_SIZE][FILTER_SIZE])conv_layer.weight); 
 
 	// Verifying ker2col operation
 	if (verify) {
 		printf("Veri gemmB ker2col: ");
 		verification = (float*)malloc(sizeof(float) * FILTER_SIZE * FILTER_SIZE * CHANNEL);
-		cudaMemcpy(verification, conv_layer.gemm_B, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CHANNEL, cudaMemcpyDeviceToHost);
-		verify_gemmB(verification, WEIGHT); //-1.0f
+		cudaMemcpy(verification, conv_layer.weight, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CHANNEL, cudaMemcpyDeviceToHost);
+		//verify_gemmB(verification, WEIGHT); //-1.0f
+
+  #if 1
+      for(int i=0; i<FILTER_SIZE * FILTER_SIZE*CHANNEL; i++){ 
+      
+      //FILTER_SIZE * FILTER_SIZE
+      if (i%(FILTER_SIZE * FILTER_SIZE) == 0){
+           printf("\n");
+      }
+      printf("%3.0f ", verification[i]);
+    }
+    printf("\n");
+  #endif 
+
+  cudaMemcpy(verification, conv_layer.gemm_B, sizeof(float) * FILTER_SIZE * FILTER_SIZE * CHANNEL, cudaMemcpyDeviceToHost);
+
+  #if 1
+    for(int i=0; i<FILTER_SIZE * FILTER_SIZE*CHANNEL; i++){ 
+      
+      //FILTER_SIZE * FILTER_SIZE
+      if (i%(FILTER_SIZE * FILTER_SIZE) == 0){
+           printf("\n");
+      }
+      printf("%3.0f ", verification[i]);
+    }
+    printf("\n");
+  #endif 
+  
+
 		free(verification);
 	}
 
-//#if 1
+#if 1
   int n = CONV_OUTPUT_SIZE * CONV_OUTPUT_SIZE; //l.out_w*l.out_h
   int k = FILTER_SIZE * FILTER_SIZE; // l.size*l.size
   int m = CHANNEL; // l.n / l.groups
@@ -757,7 +831,7 @@ static double forward_pass(double data[INSIZE][INSIZE], bool verify) {
   float *c = conv_layer.gemm_C; //l.output_gpu + (i*l.groups + j)*n*m;
 
   gemm_ongpu(0, 1, m, n, k, 1, a, k, b, k, 1, c, n);
-//#endif 
+#endif 
 
 	// Verifying cublasSgemm operation
 	if (verify) {
@@ -935,9 +1009,14 @@ int main() {
 	// Verifying the convolutional layer
 	double data[INSIZE][INSIZE];
 
+  data[0][0] = 0.0f; 
 	for (i = 0; i < INSIZE; i++) {
-		for (int j = 0; j < INSIZE; j++)
+		for (int j = 0; j < INSIZE; j++){
 			data[i][j] = INPUT; //1.0f;
+      //data[i][j+1] =  data[i][j] + 1.0f; 
+      //printf("%3.0f ", data[i][j]);
+    }
+    //printf("\n");
 	}
 
 	forward_pass(data, true);
@@ -949,7 +1028,7 @@ int main() {
 	unsigned int max = 0;
 	float res[10];
 
-	for (i = 0; i < test_cnt; i++) {
+	for (i = 0; i < 0; i++) { //test_cnt
 		time_taken += forward_pass(test_set[i].data, false);
 		cudaMemcpy(res, fc_layer.output, sizeof(float) * NUM_CLASSES, cudaMemcpyDeviceToHost);
 
